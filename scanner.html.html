@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SAFINA Barcode Scanner</title>
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+  body{margin:0;padding:18px;font-family:Arial,sans-serif;background:#fdeaf1;color:#b5174f;text-align:center}
+  h1{font-size:20px;margin:0 0 6px}
+  #status{font-weight:bold;min-height:44px;margin:8px 0}
+  #reader{max-width:420px;margin:0 auto 12px;border-radius:14px;overflow:hidden;background:#000}
+  #done{display:none;background:#fff;border-radius:14px;padding:14px;max-width:420px;margin:0 auto}
+  #code{font-size:26px;font-weight:bold;letter-spacing:1px;margin-bottom:10px;word-break:break-all}
+  button{border:0;border-radius:10px;padding:10px 18px;font-weight:bold;background:#b5174f;color:#fff;cursor:pointer;margin:4px}
+  button.ghost{background:#fff;color:#b5174f;border:2px solid #b5174f}
+</style>
+</head>
+<body>
+  <h1>📷 Scan a barcode</h1>
+  <div id="status">Starting camera…</div>
+  <div id="reader"></div>
+  <div id="done">
+    <div id="code"></div>
+    <button id="copy">Copy number</button>
+    <button id="again" class="ghost">Scan again</button>
+  </div>
+
+<script>
+  var scanner = null, lastCode = '';
+  var $ = function (id) { return document.getElementById(id); };
+
+  function beep() {
+    try {
+      var a = new (window.AudioContext || window.webkitAudioContext)(), o = a.createOscillator();
+      o.frequency.value = 880; o.connect(a.destination); o.start();
+      setTimeout(function () { o.stop(); a.close(); }, 120);
+    } catch (e) {}
+  }
+
+  function startCam() {
+    $('done').style.display = 'none';
+    $('reader').style.display = 'block';
+    $('status').textContent = 'Starting camera…';
+    scanner = new Html5Qrcode('reader', {
+      verbose: false,
+      formatsToSupport: [
+        Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8,
+        Html5QrcodeSupportedFormats.UPC_A, Html5QrcodeSupportedFormats.UPC_E,
+        Html5QrcodeSupportedFormats.CODE_128, Html5QrcodeSupportedFormats.CODE_39
+      ],
+      experimentalFeatures: { useBarCodeDetectorIfSupported: true }
+    });
+    var box = function (w, h) { return { width: Math.floor(w * 0.92), height: Math.floor(h * 0.7) }; };  // wide scan area
+
+    function fail(err) {
+      scanner = null;
+      $('status').textContent = 'Could not open the camera: ' + ((err && err.message) || err) +
+        '. Click the camera icon in the address bar and choose Allow, then reload this page.';
+    }
+
+    // First try HD video (sharper bars = easier to read); if the camera refuses, retry with default settings
+    scanner.start(
+      { facingMode: 'environment' },
+      { fps: 20, qrbox: box,
+        videoConstraints: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } },
+      onFound,
+      function () {}
+    ).then(function () {
+      $('status').textContent = 'Hold the barcode 20–30 cm away, flat and steady. Make it big on screen.';
+    }).catch(function () {
+      scanner = new Html5Qrcode('reader', {
+        verbose: false,
+        formatsToSupport: [
+          Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8,
+          Html5QrcodeSupportedFormats.UPC_A, Html5QrcodeSupportedFormats.UPC_E,
+          Html5QrcodeSupportedFormats.CODE_128, Html5QrcodeSupportedFormats.CODE_39
+        ],
+        experimentalFeatures: { useBarCodeDetectorIfSupported: true }
+      });
+      scanner.start({ facingMode: 'environment' }, { fps: 20, qrbox: box }, onFound, function () {})
+        .then(function () { $('status').textContent = 'Hold the barcode 20–30 cm away, flat and steady.'; })
+        .catch(fail);
+    });
+  }
+
+  function onFound(code) {
+    beep();
+    lastCode = code;
+    var s = scanner; scanner = null;
+    s.stop().then(function () { s.clear(); }).catch(function () {});
+
+    $('reader').style.display = 'none';
+    $('code').textContent = code;
+    $('done').style.display = 'block';
+
+    // Copy to clipboard as a backup
+    try { navigator.clipboard.writeText(code); } catch (e) {}
+
+    // Send back to the SAFINA app window that opened this page
+    var sent = false;
+    try {
+      if (window.opener && !window.opener.closed) {
+        window.opener.postMessage({ type: 'safina-barcode', code: code }, '*');
+        sent = true;
+      }
+    } catch (e) {}
+
+    if (sent) {
+      $('status').textContent = '✅ Sent to SAFINA. This window will close…';
+      setTimeout(function () { window.close(); }, 1500);
+    } else {
+      $('status').textContent = 'Number copied. Go back to SAFINA, paste it in the scan box and press Enter.';
+    }
+  }
+
+  $('copy').onclick = function () {
+    try { navigator.clipboard.writeText(lastCode); $('status').textContent = 'Copied.'; } catch (e) {}
+  };
+  $('again').onclick = startCam;
+
+  window.addEventListener('load', function () {
+    if (typeof Html5Qrcode === 'undefined') {
+      $('status').textContent = 'Scanner library not loaded. Check your internet connection and reload.';
+      return;
+    }
+    startCam();
+  });
+</script>
+</body>
+</html>
