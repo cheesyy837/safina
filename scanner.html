@@ -4,15 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SAFINA Barcode Scanner</title>
-<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <style>
-  body{margin:0;padding:18px;font-family:Arial,sans-serif;background:#fdeaf1;color:#b5174f;text-align:center}
+  body{margin:0;padding:16px;font-family:Arial,sans-serif;background:#fdeaf1;color:#b5174f;text-align:center}
   h1{font-size:20px;margin:0 0 6px}
-  #status{font-weight:bold;min-height:44px;margin:8px 0}
-  #reader{max-width:420px;margin:0 auto 12px;border-radius:14px;overflow:hidden;background:#000}
-  #done{display:none;background:#fff;border-radius:14px;padding:14px;max-width:420px;margin:0 auto}
+  #status{font-weight:bold;min-height:40px;margin:6px 0}
+  #info{font-size:12px;opacity:.8;min-height:16px}
+  #reader{position:relative;max-width:440px;margin:8px auto;border-radius:14px;overflow:hidden;background:#000;min-height:200px}
+  #reader video{width:100%;display:block}
+  #reader canvas.drawingBuffer{position:absolute;left:0;top:0;width:100%;height:100%}
+  #done{display:none;background:#fff;border-radius:14px;padding:14px;max-width:440px;margin:8px auto}
   #code{font-size:26px;font-weight:bold;letter-spacing:1px;margin-bottom:10px;word-break:break-all}
-  button{border:0;border-radius:10px;padding:10px 18px;font-weight:bold;background:#b5174f;color:#fff;cursor:pointer;margin:4px}
+  .manual{max-width:440px;margin:12px auto 0;display:flex;gap:8px}
+  .manual input{flex:1;border:2px solid #b5174f;border-radius:10px;padding:10px;font-size:16px;min-width:0}
+  button{border:0;border-radius:10px;padding:10px 16px;font-weight:bold;background:#b5174f;color:#fff;cursor:pointer;margin:2px}
   button.ghost{background:#fff;color:#b5174f;border:2px solid #b5174f}
 </style>
 </head>
@@ -20,15 +24,22 @@
   <h1>📷 Scan a barcode</h1>
   <div id="status">Starting camera…</div>
   <div id="reader"></div>
+  <div id="info"></div>
+
   <div id="done">
     <div id="code"></div>
     <button id="copy">Copy number</button>
     <button id="again" class="ghost">Scan again</button>
   </div>
 
+  <div class="manual">
+    <input id="manual" placeholder="Or type the number here" inputmode="numeric" autocomplete="off">
+    <button id="send">Send</button>
+  </div>
+
 <script>
-  var scanner = null, lastCode = '';
   var $ = function (id) { return document.getElementById(id); };
+  var running = false, lastCode = '', counts = {}, countTimer = null, frames = 0;
 
   function beep() {
     try {
@@ -38,66 +49,101 @@
     } catch (e) {}
   }
 
+  // Load the barcode library; if the first address fails, try a second one
+  function loadLib(urls, cb) {
+    if (typeof Quagga !== 'undefined') return cb(true);
+    if (!urls.length) return cb(false);
+    var s = document.createElement('script');
+    s.src = urls[0];
+    s.onload = function () { cb(typeof Quagga !== 'undefined'); };
+    s.onerror = function () { loadLib(urls.slice(1), cb); };
+    document.head.appendChild(s);
+  }
+
+  // How "sure" Quagga is about a read (lower = better)
+  function avgError(cr) {
+    var e = (cr.decodedCodes || []).filter(function (x) { return x.error !== undefined; }).map(function (x) { return x.error; });
+    return e.length ? e.reduce(function (a, b) { return a + b; }, 0) / e.length : 1;
+  }
+
+  function onDetected(result) {
+    if (!running || !result || !result.codeResult) return;
+    var cr = result.codeResult, code = String(cr.code || '');
+    if (!code || avgError(cr) > 0.25) return;          // ignore shaky reads
+    counts[code] = (counts[code] || 0) + 1;            // accept a code once it was read 3 times
+    $('info').textContent = 'Reading… ' + code + ' (' + counts[code] + '/3)';
+    clearTimeout(countTimer); countTimer = setTimeout(function () { counts = {}; }, 3000);
+    if (counts[code] >= 3) found(code);
+  }
+
+  function onProcessed(result) {
+    frames++;
+    if (frames % 15 === 0 && running) $('status').textContent = 'Scanning… hold the barcode steady (checked ' + frames + ' frames)';
+    try {
+      var ctx = Quagga.canvas.ctx.overlay, canvas = Quagga.canvas.dom.overlay;
+      ctx.clearRect(0, 0, parseInt(canvas.getAttribute('width'), 10), parseInt(canvas.getAttribute('height'), 10));
+      if (result) {
+        if (result.boxes) result.boxes.filter(function (b) { return b !== result.box; }).forEach(function (b) {
+          Quagga.ImageDebug.drawPath(b, { x: 0, y: 1 }, ctx, { color: 'green', lineWidth: 2 });
+        });
+        if (result.box) Quagga.ImageDebug.drawPath(result.box, { x: 0, y: 1 }, ctx, { color: '#00F', lineWidth: 2 });
+        if (result.codeResult && result.codeResult.code)
+          Quagga.ImageDebug.drawPath(result.line, { x: 'x', y: 'y' }, ctx, { color: 'red', lineWidth: 3 });
+      }
+    } catch (e) {}
+  }
+
+  function stopCam() {
+    if (!running) return;
+    running = false;
+    try { Quagga.offDetected(onDetected); Quagga.offProcessed(onProcessed); Quagga.stop(); } catch (e) {}
+  }
+
   function startCam() {
     $('done').style.display = 'none';
     $('reader').style.display = 'block';
+    $('info').textContent = '';
     $('status').textContent = 'Starting camera…';
-    scanner = new Html5Qrcode('reader', {
-      verbose: false,
-      formatsToSupport: [
-        Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8,
-        Html5QrcodeSupportedFormats.UPC_A, Html5QrcodeSupportedFormats.UPC_E,
-        Html5QrcodeSupportedFormats.CODE_128, Html5QrcodeSupportedFormats.CODE_39
-      ],
-      experimentalFeatures: { useBarCodeDetectorIfSupported: true }
-    });
-    var box = function (w, h) { return { width: Math.floor(w * 0.92), height: Math.floor(h * 0.7) }; };  // wide scan area
+    counts = {}; frames = 0;
 
-    function fail(err) {
-      scanner = null;
-      $('status').textContent = 'Could not open the camera: ' + ((err && err.message) || err) +
-        '. Click the camera icon in the address bar and choose Allow, then reload this page.';
-    }
-
-    // First try HD video (sharper bars = easier to read); if the camera refuses, retry with default settings
-    scanner.start(
-      { facingMode: 'environment' },
-      { fps: 20, qrbox: box,
-        videoConstraints: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } },
-      onFound,
-      function () {}
-    ).then(function () {
+    Quagga.init({
+      inputStream: {
+        type: 'LiveStream',
+        target: $('reader'),
+        constraints: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+        area: { top: '10%', right: '4%', left: '4%', bottom: '10%' }   // look at almost the whole picture
+      },
+      locator: { patchSize: 'medium', halfSample: false },
+      numOfWorkers: 0,
+      frequency: 10,
+      locate: true,
+      decoder: { readers: ['ean_reader', 'code_128_reader', 'ean_8_reader', 'upc_reader', 'upc_e_reader', 'code_39_reader'] }
+    }, function (err) {
+      if (err) {
+        $('status').textContent = 'Could not open the camera: ' + (err.message || err) +
+          '. Click the camera icon in the address bar, choose Allow, then reload this page.';
+        return;
+      }
+      running = true;
+      Quagga.onDetected(onDetected);
+      Quagga.onProcessed(onProcessed);
+      Quagga.start();
       $('status').textContent = 'Hold the barcode 20–30 cm away, flat and steady. Make it big on screen.';
-    }).catch(function () {
-      scanner = new Html5Qrcode('reader', {
-        verbose: false,
-        formatsToSupport: [
-          Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8,
-          Html5QrcodeSupportedFormats.UPC_A, Html5QrcodeSupportedFormats.UPC_E,
-          Html5QrcodeSupportedFormats.CODE_128, Html5QrcodeSupportedFormats.CODE_39
-        ],
-        experimentalFeatures: { useBarCodeDetectorIfSupported: true }
-      });
-      scanner.start({ facingMode: 'environment' }, { fps: 20, qrbox: box }, onFound, function () {})
-        .then(function () { $('status').textContent = 'Hold the barcode 20–30 cm away, flat and steady.'; })
-        .catch(fail);
     });
   }
 
-  function onFound(code) {
-    beep();
-    lastCode = code;
-    var s = scanner; scanner = null;
-    s.stop().then(function () { s.clear(); }).catch(function () {});
-
+  function found(code) {
+    stopCam(); beep(); lastCode = code;
     $('reader').style.display = 'none';
     $('code').textContent = code;
     $('done').style.display = 'block';
+    $('info').textContent = '';
+    deliver(code);
+  }
 
-    // Copy to clipboard as a backup
+  // Copy to clipboard (backup) and send to the SAFINA window that opened this page
+  function deliver(code) {
     try { navigator.clipboard.writeText(code); } catch (e) {}
-
-    // Send back to the SAFINA app window that opened this page
     var sent = false;
     try {
       if (window.opener && !window.opener.closed) {
@@ -105,7 +151,6 @@
         sent = true;
       }
     } catch (e) {}
-
     if (sent) {
       $('status').textContent = '✅ Sent to SAFINA. This window will close…';
       setTimeout(function () { window.close(); }, 1500);
@@ -114,17 +159,25 @@
     }
   }
 
-  $('copy').onclick = function () {
-    try { navigator.clipboard.writeText(lastCode); $('status').textContent = 'Copied.'; } catch (e) {}
-  };
+  $('copy').onclick = function () { try { navigator.clipboard.writeText(lastCode); $('status').textContent = 'Copied.'; } catch (e) {} };
   $('again').onclick = startCam;
+  $('send').onclick = function () {
+    var v = $('manual').value.trim();
+    if (!v) return;
+    stopCam(); lastCode = v;
+    $('reader').style.display = 'none'; $('code').textContent = v; $('done').style.display = 'block';
+    deliver(v);
+  };
+  $('manual').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('send').click(); });
 
   window.addEventListener('load', function () {
-    if (typeof Html5Qrcode === 'undefined') {
-      $('status').textContent = 'Scanner library not loaded. Check your internet connection and reload.';
-      return;
-    }
-    startCam();
+    loadLib([
+      'https://cdn.jsdelivr.net/npm/@ericblade/quagga2@1.8.4/dist/quagga.min.js',
+      'https://unpkg.com/@ericblade/quagga2@1.8.4/dist/quagga.min.js'
+    ], function (ok) {
+      if (!ok) { $('status').textContent = 'Barcode library could not load. Check your internet and reload. You can still type the number below.'; return; }
+      startCam();
+    });
   });
 </script>
 </body>
